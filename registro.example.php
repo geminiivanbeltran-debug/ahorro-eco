@@ -1,327 +1,261 @@
 <?php
-header('Content-Type: text/html; charset=utf-8');
+declare(strict_types=1);
+
+/**
+ * Plantilla de registro de usuarios de Ahorro Eco (RF-01).
+ * Renómbrala a "registro.php" y completa las llaves de reCAPTCHA y las credenciales SMTP.
+ * (registro.php está en .gitignore para que las llaves no se publiquen.)
+ *
+ * Cambios frente a la demo: el usuario elige su perfil (hogar o microempresa) y su estrato o
+ * sector; todas las consultas son preparadas; el correo de bienvenida ya NO incluye la
+ * contraseña; se pide el consentimiento de tratamiento de datos (Ley 1581 de 2012) y se
+ * recogen solo los datos necesarios (sin dirección).
+ */
+
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    include 'conexion.php'; 
+require_once __DIR__ . '/inc/bootstrap.php';
+$CFG = require __DIR__ . '/inc/config.php';
 
-    $nombre = $_POST['nombre'];
-    $apellidos = $_POST['apellidos'];
-    $departamento = $_POST['departamento'];
-    $ciudad = $_POST['ciudad'];
-    $direccion = $_POST['direccion'];
-    $valor_kwh = $_POST['valor_kwh'];
-    $correo = $conn->real_escape_string($_POST['correo']);
-    $clave_plana = $_POST['clave'];
-    $confirmar_clave = $_POST['confirmar_clave'];
-    $recaptcha_response = $_POST['g-recaptcha-response'];
+const RECAPTCHA_SECRET = 'TU_RECAPTCHA_SECRET_KEY';
+const RECAPTCHA_SITE   = 'TU_RECAPTCHA_SITE_KEY';
+const SMTP_USUARIO     = 'TU_CORREO_SMTP@gmail.com';
+const SMTP_CLAVE       = 'TU_CONTRASENA_DE_APLICACION';
+const URL_ACCESO       = 'https://TU_DOMINIO/index.php';
 
-    // 1. Validación de Google reCAPTCHA (Reemplazar con tu Secret Key)
-    $recaptcha_secret = 'TU_RECAPTCHA_SECRET_KEY'; 
-    $verify_response = file_get_contents('https://www.google.com/recaptcha/api/siteverify?secret=' . $recaptcha_secret . '&response=' . $recaptcha_response);
-    $response_data = json_decode($verify_response);
+$mensaje = '';
+$registrado = false;
+$v = ['nombre' => '', 'apellidos' => '', 'correo' => '', 'tipo' => 'hogar', 'estrato' => '', 'sector' => ''];
 
-    if (!$response_data->success) {
-        $mensaje = "<div class='alerta error'>Error: Por favor, verifica que no eres un robot (Captcha).</div>";
+function verificar_captcha(string $respuesta): bool
+{
+    if (RECAPTCHA_SECRET === 'TU_RECAPTCHA_SECRET_KEY') {
+        return true; // modo desarrollo: aún no se configuró reCAPTCHA. Configúralo antes de publicar.
     }
-    // 2. Validación de coincidencia de contraseñas
-    elseif ($clave_plana !== $confirmar_clave) {
-        $mensaje = "<div class='alerta error'>Error: Las contraseñas no coinciden.</div>";
+    $ch = curl_init('https://www.google.com/recaptcha/api/siteverify');
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query(['secret' => RECAPTCHA_SECRET, 'response' => $respuesta]),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 8,
+    ]);
+    $salida = curl_exec($ch);
+    curl_close($ch);
+    $datos = is_string($salida) ? json_decode($salida, true) : null;
+    return is_array($datos) && !empty($datos['success']);
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_exigir();
+
+    $v['nombre']    = trim((string) ($_POST['nombre'] ?? ''));
+    $v['apellidos'] = trim((string) ($_POST['apellidos'] ?? ''));
+    $v['correo']    = trim((string) ($_POST['correo'] ?? ''));
+    $v['tipo']      = (string) ($_POST['tipo_usuario'] ?? 'hogar');
+    $v['estrato']   = (string) ($_POST['estrato'] ?? '');
+    $v['sector']    = (string) ($_POST['sector'] ?? '');
+    $clave          = (string) ($_POST['clave'] ?? '');
+    $confirmar      = (string) ($_POST['confirmar_clave'] ?? '');
+
+    $error = null;
+    if (!verificar_captcha((string) ($_POST['g-recaptcha-response'] ?? ''))) {
+        $error = 'Por favor, verifica que no eres un robot (captcha).';
+    } elseif ($v['nombre'] === '' || mb_strlen($v['nombre']) > 100 || $v['apellidos'] === '' || mb_strlen($v['apellidos']) > 100) {
+        $error = 'Escribe tu nombre y tus apellidos (máximo 100 caracteres cada uno).';
+    } elseif (!filter_var($v['correo'], FILTER_VALIDATE_EMAIL) || mb_strlen($v['correo']) > 100) {
+        $error = 'El correo electrónico no es válido.';
+    } elseif (!in_array($v['tipo'], ['hogar', 'microempresa'], true)) {
+        $error = 'Elige si eres un hogar o una microempresa.';
+    } elseif ($v['tipo'] === 'hogar' && !preg_match('/^[1-6]$/', $v['estrato'])) {
+        $error = 'Elige tu estrato (1 a 6).';
+    } elseif ($v['tipo'] === 'microempresa' && !isset($CFG['sectores'][$v['sector']])) {
+        $error = 'Elige el sector de tu negocio.';
+    } elseif (empty($_POST['acepto_datos'])) {
+        $error = 'Debes aceptar el tratamiento de tus datos personales para registrarte.';
+    } elseif ($clave !== $confirmar) {
+        $error = 'Las contraseñas no coinciden.';
+    } elseif (!preg_match('/^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{8,}$/', $clave)) {
+        $error = 'La clave debe tener al menos 8 caracteres, una mayúscula, una minúscula y un carácter especial.';
     }
-    // 3. Validación de seguridad de la contraseña
-    elseif (!preg_match('/^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{8,}$/', $clave_plana)) {
-        $mensaje = "<div class='alerta error'>Error: La clave debe tener al menos 8 caracteres, una mayúscula, una minúscula y un carácter especial.</div>";
+
+    if ($error === null) {
+        $stmt = $conn->prepare('SELECT id FROM usuarios WHERE correo = ? LIMIT 1');
+        $stmt->bind_param('s', $v['correo']);
+        $stmt->execute();
+        $existe = $stmt->get_result()->num_rows > 0;
+        $stmt->close();
+        if ($existe) {
+            $error = 'Este correo electrónico ya se encuentra registrado.';
+        }
+    }
+
+    if ($error !== null) {
+        $mensaje = "<div class='alerta error'>" . e($error) . "</div>";
     } else {
-        // 4. Validación de correo existente
-        $check_correo = "SELECT id FROM usuarios WHERE correo = '$correo'";
-        $resultado_check = $conn->query($check_correo);
+        $hash = password_hash($clave, PASSWORD_DEFAULT);
+        $depto = 'Valle del Cauca';
+        $ciudad = 'Cali';
+        $estrato = $v['tipo'] === 'hogar' ? (int) $v['estrato'] : null;
+        $sector = $v['tipo'] === 'microempresa' ? $v['sector'] : null;
 
-        if ($resultado_check->num_rows > 0) {
-            $mensaje = "<div class='alerta error'>Atención: Este correo electrónico ya se encuentra registrado.</div>";
+        $stmt = $conn->prepare(
+            'INSERT INTO usuarios (nombre, apellidos, departamento, ciudad, correo, clave, tipo_usuario, estrato, sector)
+             VALUES (?,?,?,?,?,?,?,?,?)'
+        );
+        $stmt->bind_param('sssssssis', $v['nombre'], $v['apellidos'], $depto, $ciudad, $v['correo'], $hash, $v['tipo'], $estrato, $sector);
+        $ok = $stmt->execute();
+        if (!$ok) {
+            error_log('Ahorro Eco: error al registrar usuario: ' . $stmt->error);
+        }
+        $stmt->close();
+
+        if (!$ok) {
+            $mensaje = "<div class='alerta error'>No se pudo completar el registro. Inténtalo de nuevo más tarde.</div>";
         } else {
-            // Registro exitoso
-            $clave = password_hash($clave_plana, PASSWORD_DEFAULT); 
-            $sql = "INSERT INTO usuarios (nombre, apellidos, departamento, ciudad, direccion, valor_kwh, correo, clave) 
-                    VALUES ('$nombre', '$apellidos', '$departamento', '$ciudad', '$direccion', '$valor_kwh', '$correo', '$clave')";
+            $registrado = true;
+            $mensaje = "<div class='alerta exito'>Registro exitoso. Ya puedes iniciar sesión.</div>";
 
-            if ($conn->query($sql) === TRUE) {
-                require 'PHPMailer/src/Exception.php';
-                require 'PHPMailer/src/PHPMailer.php';
-                require 'PHPMailer/src/SMTP.php';
-
-                $mail = new PHPMailer(true);
+            // Correo de bienvenida (opcional): nunca incluye la contraseña.
+            if (SMTP_USUARIO !== 'TU_CORREO_SMTP@gmail.com') {
                 try {
+                    require_once __DIR__ . '/PHPMailer/src/Exception.php';
+                    require_once __DIR__ . '/PHPMailer/src/PHPMailer.php';
+                    require_once __DIR__ . '/PHPMailer/src/SMTP.php';
+                    $mail = new PHPMailer(true);
                     $mail->CharSet = 'UTF-8';
-                    $mail->isSMTP();                                            
-                    $mail->Host       = 'smtp.gmail.com'; 
-                    $mail->SMTPAuth   = true;                                   
-                    $mail->Username   = 'TU_CORREO_SMTP@gmail.com'; 
-                    $mail->Password   = 'TU_CONTRASENA_DE_APLICACION'; 
-                    $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS; 
-                    $mail->Port       = 465;                                    
-
-                    $mail->setFrom('TU_CORREO_SMTP@gmail.com', 'Ahorro Eco');
-                    $mail->addAddress($correo, $nombre);     
-
-                    $mail->isHTML(true);                                  
-                    $mail->Subject = '¡Bienvenido a Ahorro Eco! - Tus credenciales de acceso';
-                    $mail->Body = "
-                        <div style='font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;'>
-                            <div style='background-color: #000000; padding: 20px; text-align: center;'>
-                                <h1 style='color: #ffffff; margin: 0;'>Ahorro Eco</h1>
-                            </div>
-                            <div style='padding: 30px;'>
-                                <h2 style='color: #000000;'>¡Hola $nombre!</h2>
-                                <p>Gracias por registrarte en <b>Ahorro Eco</b>. Tu cuenta ha sido creada exitosamente.</p>
-                                <p>A continuación, te compartimos tus credenciales para que puedas ingresar a la plataforma:</p>
-                                
-                                <div style='background-color: #f8f9fa; padding: 20px; border-left: 4px solid #000000; margin: 25px 0;'>
-                                    <p style='margin: 5px 0;'><b>URL de acceso:</b> <a href='https://ahorroeco.lat/index.php' style='color: #000000; text-decoration: underline;'>https://ahorroeco.lat</a></p>
-                                    <p style='margin: 5px 0;'><b>Usuario (Correo):</b> $correo</p>
-                                    <p style='margin: 5px 0;'><b>Clave:</b> $clave_plana</p>
-                                </div>
-                                
-                                <p>Te recomendamos guardar este correo en un lugar seguro.</p>
-                                <p>¡Empieza a optimizar tu consumo de energía hoy mismo!</p>
-                            </div>
-                        </div>
-                    ";
-
+                    $mail->isSMTP();
+                    $mail->Host = 'smtp.gmail.com';
+                    $mail->SMTPAuth = true;
+                    $mail->Username = SMTP_USUARIO;
+                    $mail->Password = SMTP_CLAVE;
+                    $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
+                    $mail->Port = 465;
+                    $mail->setFrom(SMTP_USUARIO, 'Ahorro Eco');
+                    $mail->addAddress($v['correo'], $v['nombre']);
+                    $mail->isHTML(true);
+                    $mail->Subject = '¡Bienvenido a Ahorro Eco!';
+                    $mail->Body = '<div style="font-family:Arial,sans-serif;color:#333;max-width:560px;margin:0 auto">'
+                        . '<h2>¡Hola ' . e($v['nombre']) . '!</h2>'
+                        . '<p>Tu cuenta de <b>Ahorro Eco</b> fue creada. Ingresa con tu correo <b>' . e($v['correo']) . '</b> y la contraseña que elegiste.</p>'
+                        . '<p><a href="' . e(URL_ACCESO) . '">Entrar a Ahorro Eco</a></p>'
+                        . '<p style="font-size:12px;color:#777">Por tu seguridad, nunca enviamos tu contraseña por correo.</p></div>';
                     $mail->send();
-                    $mensaje = "<div class='alerta exito'>Registro exitoso. Se han enviado las credenciales a tu correo. <br><br><button type='button' class='btn btn-black' onclick=\"window.location.href='index.php'\">Ir a Iniciar Sesión</button></div>";
-                } catch (Exception $e) {
-                    $mensaje = "<div class='alerta exito'>Registro exitoso (Sin correo). <br><br><button type='button' class='btn btn-black' onclick=\"window.location.href='index.php'\">Ir a Iniciar Sesión</button></div>";
+                } catch (Exception $ex) {
+                    error_log('Ahorro Eco: no se pudo enviar el correo de bienvenida: ' . $ex->getMessage());
                 }
-            } else {
-                $mensaje = "<div class='alerta error'>Error al registrar: " . $conn->error . "</div>";
             }
         }
     }
-    $conn->close();
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ahorro Eco - Registro de Usuario</title>
-    
-    <script src="https://www.google.com/recaptcha/api.js" async defer></script>
-    
+    <?php if (RECAPTCHA_SECRET !== 'TU_RECAPTCHA_SECRET_KEY'): ?><script src="https://www.google.com/recaptcha/api.js" async defer></script><?php endif; ?>
+    <?php include __DIR__ . '/inc/pwa_head.php'; ?>
     <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            background-color: #f0f2f5; 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-            min-height: 100vh; 
-            margin: 0; 
-            padding: 40px 20px;
-            box-sizing: border-box;
-        }
-        
-        .register-card { 
-            width: 100%; 
-            max-width: 750px; 
-            background-color: #ffffff; 
-            padding: 40px 45px; 
-            border-radius: 12px; 
-            box-shadow: 0 8px 25px rgba(0,0,0,0.1); 
-            box-sizing: border-box; 
-        }
-
-        .app-title-container { 
-            text-align: center; 
-            margin-bottom: 30px; 
-        }
-        .app-logo { width: 120px; height: auto; display: block; margin: 0 auto 10px; }
-        .app-title { color: #2e7d32; font-size: 26px; font-weight: 900; margin-bottom: 5px; }
-        .subtitle { font-size: 16px; font-weight: bold; color: #555; }
-
-        .form-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr; 
-            gap: 15px 20px; 
-        }
-        .full-width {
-            grid-column: 1 / -1; 
-        }
-
-        .input-group label { font-size: 14px; font-weight: bold; color: #333; display: block; margin-bottom: 6px; }
-        .input-group input, .input-group select { 
-            width: 100%; padding: 12px; border: 1px solid #cccccc; border-radius: 8px; 
-            box-sizing: border-box; font-size: 15px; color: #000; background-color: #fff;
-            transition: border-color 0.3s;
-        }
-        .input-group input:focus, .input-group select:focus { border-color: #2e7d32; outline: none; }
-
-        .currency-wrapper { position: relative; display: flex; align-items: center; }
-        .currency-symbol { position: absolute; left: 12px; font-size: 16px; font-weight: bold; color: #555; }
-        .currency-code { position: absolute; right: 12px; font-size: 13px; font-weight: bold; color: #777; }
-        .currency-input { padding-left: 28px !important; padding-right: 50px !important; }
-
-        .recaptcha-container { display: flex; justify-content: center; margin: 10px 0 20px; }
-
-        .btn { padding: 15px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: transform 0.1s, opacity 0.2s; width: 100%; text-align: center; box-sizing: border-box; display: inline-block; }
-        .btn:active { transform: scale(0.97); }
-        .btn-black { background-color: #000000; color: #ffffff; border: none; }
-        .btn-black:hover { opacity: 0.85; }
-        .btn-outline { background-color: transparent; color: #000000; border: 2px solid #000000; margin-top: 10px;}
-        .btn-outline:hover { background-color: #f8f9fa; }
-
-        .alerta { padding: 15px; border-radius: 8px; margin-bottom: 25px; text-align: center; font-size: 15px; font-weight: bold; }
-        .exito { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-
-        @media (max-width: 768px) {
-            body { background-color: #ffffff; padding: 0; align-items: flex-start; }
-            .register-card { padding: 30px 20px; border-radius: 0; box-shadow: none; }
-            .form-grid { grid-template-columns: 1fr; gap: 15px; } 
-            .app-logo { width: 100px; }
-            .app-title { font-size: 24px; }
-            .g-recaptcha { transform: scale(0.90); transform-origin: center; } 
-        }
+        body { font-family: Arial, sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 30px 16px; box-sizing: border-box; }
+        .card { width: 100%; max-width: 720px; background: #fff; padding: 36px 40px; border-radius: 12px; box-shadow: 0 8px 25px rgba(0,0,0,.1); box-sizing: border-box; }
+        .titulo { text-align: center; margin-bottom: 24px; }
+        .titulo img { width: 110px; display: block; margin: 0 auto 8px; }
+        .titulo h1 { color: #2e7d32; font-size: 26px; font-weight: 900; margin: 0 0 4px; }
+        .titulo p { margin: 0; color: #555; font-weight: bold; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
+        .full { grid-column: 1 / -1; }
+        label { font-size: 14px; font-weight: bold; color: #333; display: block; margin-bottom: 6px; }
+        input[type=text], input[type=email], input[type=password], select { width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; font-size: 15px; background: #fff; }
+        input:focus, select:focus { border-color: #2e7d32; outline: none; }
+        .opciones { display: flex; gap: 12px; }
+        .opcion { flex: 1; border: 2px solid #ccc; border-radius: 8px; padding: 12px; font-weight: bold; cursor: pointer; display: flex; gap: 8px; align-items: center; margin: 0; }
+        .opcion input { width: auto; }
+        .check { display: flex; gap: 8px; align-items: flex-start; font-weight: normal; font-size: 13.5px; color: #444; }
+        .check input { width: auto; margin-top: 3px; }
+        .btn { padding: 14px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; box-sizing: border-box; border: none; text-align: center; display: block; text-decoration: none; }
+        .btn-negro { background: #000; color: #fff; } .btn-borde { background: transparent; color: #000; border: 2px solid #000; margin-top: 10px; }
+        .alerta { padding: 14px; border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
+        .alerta.exito { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alerta.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .ayuda { font-size: 12px; color: #777; margin-top: 4px; }
+        @media (max-width: 700px) { .card { padding: 26px 18px; } .grid { grid-template-columns: 1fr; } .opciones { flex-direction: column; } }
     </style>
-    
-    <script>
-        const ciudadesCol = {
-            "Amazonas": ["Leticia", "Puerto Nariño"],
-            "Antioquia": ["Medellín", "Abejorral", "Apartadó", "Bello", "Caucasia", "Envigado", "Itagüí", "Rionegro", "Santa Fe de Antioquia", "Turbo"],
-            "Arauca": ["Arauca", "Arauquita", "Cravo Norte", "Fortul", "Puerto Rondón", "Saravena", "Tame"],
-            "Atlántico": ["Barranquilla", "Baranoa", "Malambo", "Puerto Colombia", "Sabanalarga", "Soledad"],
-            "Bolívar": ["Cartagena", "Carmen de Bolívar", "Magangué", "Mompós", "Turbaco"],
-            "Boyacá": ["Tunja", "Chiquinquirá", "Duitama", "Sogamoso", "Villa de Leyva"],
-            "Caldas": ["Manizales", "Chinchiná", "Dorada", "Riosucio", "Villamaría"],
-            "Caquetá": ["Florencia", "El Doncello", "Puerto Rico", "San Vicente del Caguán"],
-            "Casanare": ["Yopal", "Aguazul", "Paz de Ariporo", "Tauramena", "Villanueva"],
-            "Cauca": ["Popayán", "El Tambo", "Patía", "Puerto Tejada", "Santander de Quilichao"],
-            "Cesar": ["Valledupar", "Aguachica", "Agustín Codazzi", "Bosconia", "Curumaní"],
-            "Chocó": ["Quibdó", "Istmina", "Tadó", "Condoto", "Bahía Solano"],
-            "Córdoba": ["Montería", "Cereté", "Lorica", "Montelíbano", "Planeta Rica", "Sahagún"],
-            "Cundinamarca": ["Bogotá D.C.", "Chía", "Cajicá", "Facatativá", "Fusagasugá", "Girardot", "Soacha", "Zipaquirá"],
-            "Guainía": ["Inírida", "Barranco Minas"],
-            "Guaviare": ["San José del Guaviare", "Calamar", "El Retorno", "Miraflores"],
-            "Huila": ["Neiva", "Campoalegre", "Garzón", "La Plata", "Pitalito"],
-            "La Guajira": ["Riohacha", "Fonseca", "Maicao", "San Juan del Cesar", "Uribia"],
-            "Magdalena": ["Santa Marta", "Aracataca", "Ciénaga", "El Banco", "Fundación", "Plato"],
-            "Meta": ["Villavicencio", "Acacías", "Granada", "Puerto Gaitán", "Puerto López"],
-            "Nariño": ["Pasto", "Ipiales", "Tumaco", "Túquerres", "Sandoná"],
-            "Norte de Santander": ["Cúcuta", "Los Patios", "Ocaña", "Pamplona", "Villa del Rosario"],
-            "Putumayo": ["Mocoa", "Orito", "Puerto Asís", "Puerto Leguízamo", "Sibundoy"],
-            "Quindío": ["Armenia", "Calarcá", "Circasia", "Montenegro", "Quimbaya"],
-            "Risaralda": ["Pereira", "Dosquebradas", "La Virginia", "Santa Rosa de Cabal"],
-            "San Andrés y Providencia": ["San Andrés", "Providencia"],
-            "Santander": ["Bucaramanga", "Barrancabermeja", "Floridablanca", "Girón", "Piedecuesta", "San Gil", "Socorro"],
-            "Sucre": ["Sincelejo", "Corozal", "San Marcos", "Tolú"],
-            "Tolima": ["Ibagué", "Chaparral", "Espinal", "Honda", "Mariquita", "Melgar"],
-            "Valle del Cauca": ["Cali", "Buenaventura", "Buga", "Cartago", "Jamundí", "Palmira", "Tuluá", "Yumbo"],
-            "Vaupés": ["Mitú", "Carurú", "Taraira"],
-            "Vichada": ["Puerto Carreño", "Cumaribo", "La Primavera", "Santa Rosalía"]
-        };
-
-        function cargarCiudades() {
-            const depto = document.getElementById("departamento").value;
-            const selectCiudad = document.getElementById("ciudad");
-            selectCiudad.innerHTML = '<option value="">Seleccione una ciudad...</option>'; 
-
-            if (ciudadesCol[depto]) {
-                ciudadesCol[depto].sort().forEach(ciudad => {
-                    let option = document.createElement("option");
-                    option.value = ciudad;
-                    option.text = ciudad;
-                    selectCiudad.add(option);
-                });
-            }
-        }
-    </script>
 </head>
 <body>
-    <div class="register-card">
-        
-        <div class="app-title-container">
-            <img src="image_2f3ead.png" alt="Logo Ahorro Eco" class="app-logo">
-            <h1 class="app-title">Ahorro Eco</h1>
-            <div class="subtitle">Creación de Nueva Cuenta</div>
-        </div>
+<div class="card">
+    <div class="titulo">
+        <img src="image_2f3ead.png" alt="Logo Ahorro Eco">
+        <h1>Ahorro Eco</h1>
+        <p>Creación de nueva cuenta</p>
+    </div>
+    <?= $mensaje ?>
 
-        <?php if(isset($mensaje)) echo $mensaje; ?>
+    <?php if ($registrado): ?>
+        <a href="index.php" class="btn btn-negro">Ir a iniciar sesión</a>
+    <?php else: ?>
+    <form action="registro.php" method="POST">
+        <?= csrf_campo() ?>
+        <div class="grid">
+            <div><label for="nombre">Nombre</label><input type="text" id="nombre" name="nombre" maxlength="100" required value="<?= e($v['nombre']) ?>"></div>
+            <div><label for="apellidos">Apellidos</label><input type="text" id="apellidos" name="apellidos" maxlength="100" required value="<?= e($v['apellidos']) ?>"></div>
+            <div class="full"><label for="correo">Correo electrónico</label><input type="email" id="correo" name="correo" maxlength="100" required value="<?= e($v['correo']) ?>"></div>
 
-        <?php if(!isset($mensaje) || strpos($mensaje, 'exito') === false): ?>
-        <form action="registro.php" method="POST">
-            
-            <div class="form-grid">
-                <div class="input-group">
-                    <label for="nombre">Nombre</label>
-                    <input type="text" id="nombre" name="nombre" required>
-                </div>
-                <div class="input-group">
-                    <label for="apellidos">Apellidos</label>
-                    <input type="text" id="apellidos" name="apellidos" required>
-                </div>
-                
-                <div class="input-group">
-                    <label for="departamento">Departamento</label>
-                    <select id="departamento" name="departamento" onchange="cargarCiudades()" required>
-                        <option value="">Seleccione un departamento...</option>
-                        <script>
-                            Object.keys(ciudadesCol).sort().forEach(depto => {
-                                document.write(`<option value="${depto}">${depto}</option>`);
-                            });
-                        </script>
-                    </select>
-                </div>
-                <div class="input-group">
-                    <label for="ciudad">Ciudad / Municipio</label>
-                    <select id="ciudad" name="ciudad" required>
-                        <option value="">Seleccione un departamento primero...</option>
-                    </select>
-                </div>
-                
-                <div class="input-group full-width">
-                    <label for="direccion">Dirección de Residencia</label>
-                    <input type="text" id="direccion" name="direccion" required>
-                </div>
-                
-                <div class="input-group">
-                    <label for="correo">Correo Electrónico</label>
-                    <input type="email" id="correo" name="correo" required>
-                </div>
-                <div class="input-group">
-                    <label for="valor_kwh">Valor kWh (En Pesos Colombianos)</label>
-                    <div class="currency-wrapper">
-                        <span class="currency-symbol">$</span>
-                        <input type="number" step="0.01" id="valor_kwh" name="valor_kwh" class="currency-input" required>
-                        <span class="currency-code">COP</span>
-                    </div>
-                </div>
-
-                <div class="input-group">
-                    <label for="clave">Crear Clave</label>
-                    <input type="password" id="clave" name="clave" placeholder="Min 8, mayúsculas, minúsculas y especial" required>
-                </div>
-                <div class="input-group">
-                    <label for="confirmar_clave">Confirmar Clave</label>
-                    <input type="password" id="confirmar_clave" name="confirmar_clave" placeholder="Repite tu contraseña" required>
-                </div>
-
-                <!-- Reemplazar con tu Site Key de Google reCAPTCHA -->
-                <div class="full-width recaptcha-container">
-                    <div class="g-recaptcha" data-sitekey="TU_RECAPTCHA_SITE_KEY"></div>
-                </div>
-                
-                <div class="full-width">
-                    <button type="submit" class="btn btn-black">Registrar en el Sistema</button>
-                    <button type="button" class="btn btn-outline" onclick="window.location.href='index.php'">Volver al Inicio</button>
+            <div class="full">
+                <label>¿Quién usará Ahorro Eco?</label>
+                <div class="opciones">
+                    <label class="opcion"><input type="radio" name="tipo_usuario" value="hogar" onchange="alternar()" <?= $v['tipo'] === 'hogar' ? 'checked' : '' ?>> 🏠 Un hogar</label>
+                    <label class="opcion"><input type="radio" name="tipo_usuario" value="microempresa" onchange="alternar()" <?= $v['tipo'] === 'microempresa' ? 'checked' : '' ?>> 🏪 Una microempresa</label>
                 </div>
             </div>
-            
-        </form>
-        <?php endif; ?>
-        
-    </div>
+
+            <div id="grp_estrato">
+                <label for="estrato">Estrato</label>
+                <select id="estrato" name="estrato">
+                    <?php for ($i = 1; $i <= 6; $i++): ?><option value="<?= $i ?>" <?= $v['estrato'] === (string) $i ? 'selected' : '' ?>>Estrato <?= $i ?></option><?php endfor; ?>
+                </select>
+                <div class="ayuda">Define la tarifa de EMCALI que se usa en tus cálculos.</div>
+            </div>
+            <div id="grp_sector" style="display:none">
+                <label for="sector">Sector del negocio</label>
+                <select id="sector" name="sector">
+                    <?php foreach ($CFG['sectores'] as $clave => $texto): ?><option value="<?= e($clave) ?>" <?= $v['sector'] === $clave ? 'selected' : '' ?>><?= e($texto) ?></option><?php endforeach; ?>
+                </select>
+                <div class="ayuda">Las microempresas pagan la tarifa comercial.</div>
+            </div>
+            <div><label>Ciudad</label><input type="text" value="Santiago de Cali, Valle del Cauca" readonly><div class="ayuda">El prototipo usa las tarifas de EMCALI.</div></div>
+
+            <div><label for="clave">Contraseña</label><input type="password" id="clave" name="clave" required placeholder="Mín. 8, mayúscula, minúscula y especial" autocomplete="new-password"></div>
+            <div><label for="confirmar_clave">Confirmar contraseña</label><input type="password" id="confirmar_clave" name="confirmar_clave" required autocomplete="new-password"></div>
+
+            <div class="full">
+                <label class="check"><input type="checkbox" name="acepto_datos" value="1" required>
+                    <span>Autorizo el tratamiento de mis datos personales (correo, tipo de usuario, estrato o sector, equipos y lecturas) con fines académicos del proyecto Ahorro Eco, conforme a la Ley 1581 de 2012. Mi participación es voluntaria y puedo pedir la eliminación de mis datos en cualquier momento desde mi perfil.</span></label>
+            </div>
+
+            <?php if (RECAPTCHA_SECRET !== 'TU_RECAPTCHA_SECRET_KEY'): ?>
+            <div class="full" style="display:flex;justify-content:center"><div class="g-recaptcha" data-sitekey="<?= e(RECAPTCHA_SITE) ?>"></div></div>
+            <?php endif; ?>
+
+            <div class="full">
+                <button type="submit" class="btn btn-negro">Registrar en el sistema</button>
+                <a class="btn btn-borde" href="index.php">Volver al inicio</a>
+            </div>
+        </div>
+    </form>
+    <?php endif; ?>
+</div>
+<script>
+function alternar() {
+    var micro = document.querySelector('input[name=tipo_usuario]:checked').value === 'microempresa';
+    document.getElementById('grp_estrato').style.display = micro ? 'none' : '';
+    document.getElementById('grp_sector').style.display = micro ? '' : 'none';
+}
+alternar();
+</script>
 </body>
 </html>

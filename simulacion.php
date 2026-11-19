@@ -72,6 +72,10 @@ if ($stmt_u) {
             .content { padding: 25px 15px; } .section-title { font-size: 26px; }
         }
     </style>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#2e7d32">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <script>if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); }); }</script>
 </head>
 <body>
     <div class="app-container">
@@ -80,6 +84,8 @@ if ($stmt_u) {
         <nav class="main-nav">
             <a href="home.php"><span class="icon">🏠</span>Home</a>
             <a href="iot.php"><span class="icon">📡</span>IOT</a>
+            <a href="equipos.php"><span class="icon">🔌</span>Equipos</a>
+            <a href="consumo.php"><span class="icon">⚡</span>Consumo</a>
             <a href="monitoreo.php"><span class="icon">📊</span>Monitoreo</a>
             <a href="recomendaciones.php"><span class="icon">💡</span>Recomendación</a>
             <a href="simulacion.php" class="active"><span class="icon">🖥️</span>Simulación</a>

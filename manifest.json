@@ -1,0 +1,16 @@
+{
+  "name": "Ahorro Eco",
+  "short_name": "Ahorro Eco",
+  "description": "Simula tu consumo de energía y recibe recomendaciones de ahorro para tu hogar o microempresa en Cali.",
+  "lang": "es-CO",
+  "start_url": "home.php",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2e7d32",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

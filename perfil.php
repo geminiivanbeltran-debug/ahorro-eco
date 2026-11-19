@@ -1,58 +1,108 @@
 <?php
 header('Content-Type: text/html; charset=utf-8');
-session_start();
+require __DIR__ . '/inc/bootstrap.php';
 
-if (!isset($_SESSION['usuario_id'])) {
-    header("Location: index.php");
-    exit();
-}
-
-include 'conexion.php';
-$usuario_id = $_SESSION['usuario_id'];
+$usuario_id = requiere_sesion();
 $mensaje = "";
+
+// Tipos de imagen permitidos para la foto de perfil (se valida el CONTENIDO, no solo la extensión).
+$TIPOS_FOTO = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'];
 
 // 1. Procesar actualización de datos y foto
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $nombre = $conn->real_escape_string($_POST['nombre']);
-    $apellidos = $conn->real_escape_string($_POST['apellidos']);
-    $departamento = $conn->real_escape_string($_POST['departamento']);
-    $ciudad = $conn->real_escape_string($_POST['ciudad']);
-    $direccion = $conn->real_escape_string($_POST['direccion']);
-    $valor_kwh = $conn->real_escape_string($_POST['valor_kwh']);
+    csrf_exigir();
+    $errores = [];
 
-    if (isset($_FILES['foto_perfil']) && $_FILES['foto_perfil']['error'] === UPLOAD_ERR_OK) {
-        $dir = 'uploads/';
-        if (!is_dir($dir)) { mkdir($dir, 0755, true); } 
-        
-        $viejos = glob($dir . "perfil_" . $usuario_id . ".*");
-        foreach($viejos as $v) { unlink($v); }
-        
-        $ext = pathinfo($_FILES['foto_perfil']['name'], PATHINFO_EXTENSION);
-        $ruta_destino = $dir . "perfil_" . $usuario_id . "." . strtolower($ext);
-        move_uploaded_file($_FILES['foto_perfil']['tmp_name'], $ruta_destino);
+    $nombre       = trim((string) ($_POST['nombre'] ?? ''));
+    $apellidos    = trim((string) ($_POST['apellidos'] ?? ''));
+    $departamento = trim((string) ($_POST['departamento'] ?? ''));
+    $ciudad       = trim((string) ($_POST['ciudad'] ?? ''));
+    $valor_kwh    = filter_var(str_replace(',', '.', (string) ($_POST['valor_kwh'] ?? '')), FILTER_VALIDATE_FLOAT);
+    $tipo         = (string) ($_POST['tipo_usuario'] ?? '');
+
+    if ($nombre === '' || mb_strlen($nombre) > 100 || $apellidos === '' || mb_strlen($apellidos) > 100) {
+        $errores[] = 'Escribe tu nombre y tus apellidos (máximo 100 caracteres cada uno).';
+    }
+    if ($departamento === '' || mb_strlen($departamento) > 100 || $ciudad === '' || mb_strlen($ciudad) > 100) {
+        $errores[] = 'Selecciona un departamento y una ciudad.';
+    }
+    if ($valor_kwh === false || $valor_kwh < 0 || $valor_kwh > 10000) {
+        $errores[] = 'El valor del kWh no es válido.';
+    }
+    if (!in_array($tipo, ['hogar', 'microempresa'], true)) {
+        $errores[] = 'Elige si eres un hogar o una microempresa.';
     }
 
-    $sql_update = "UPDATE usuarios SET nombre='$nombre', apellidos='$apellidos', departamento='$departamento', ciudad='$ciudad', direccion='$direccion', valor_kwh='$valor_kwh' WHERE id='$usuario_id'";
-    
-    if ($conn->query($sql_update) === TRUE) {
-        $_SESSION['nombre'] = $nombre; 
-        $mensaje = "<div class='alerta exito'>¡Perfil actualizado correctamente!</div>";
+    $estrato = null;
+    $sector = null;
+    if ($tipo === 'hogar') {
+        $estrato = filter_var($_POST['estrato'] ?? '', FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 6]]);
+        if ($estrato === false) { $errores[] = 'Elige tu estrato (1 a 6).'; $estrato = null; }
+    } elseif ($tipo === 'microempresa') {
+        $sector = (string) ($_POST['sector'] ?? '');
+        if (!isset($CFG['sectores'][$sector])) { $errores[] = 'Elige el sector de tu negocio.'; $sector = null; }
+    }
+
+    $limite = null;
+    if (trim((string) ($_POST['limite_diario_kwh'] ?? '')) !== '') {
+        $limite = filter_var(str_replace(',', '.', (string) $_POST['limite_diario_kwh']), FILTER_VALIDATE_FLOAT);
+        if ($limite === false || $limite <= 0 || $limite > 100000) { $errores[] = 'El límite diario debe ser un número mayor que cero.'; $limite = null; }
+    }
+
+    // Foto: tamaño máximo 2 MB, tipo real (finfo + getimagesize) y nombre generado por el servidor.
+    $nuevaFoto = null;
+    if (isset($_FILES['foto_perfil']) && $_FILES['foto_perfil']['error'] !== UPLOAD_ERR_NO_FILE) {
+        $f = $_FILES['foto_perfil'];
+        if ($f['error'] !== UPLOAD_ERR_OK || $f['size'] > 2 * 1024 * 1024) {
+            $errores[] = 'La foto no se pudo subir. Debe pesar máximo 2 MB.';
+        } else {
+            $mime = (new finfo(FILEINFO_MIME_TYPE))->file($f['tmp_name']);
+            if (!isset($TIPOS_FOTO[$mime]) || @getimagesize($f['tmp_name']) === false) {
+                $errores[] = 'La foto debe ser una imagen JPG, PNG o WEBP.';
+            } else {
+                $nuevaFoto = ['tmp' => $f['tmp_name'], 'ext' => $TIPOS_FOTO[$mime]];
+            }
+        }
+    }
+
+    if ($errores) {
+        $mensaje = "<div class='alerta error'>" . e(implode(' ', $errores)) . "</div>";
     } else {
-        $mensaje = "<div class='alerta error'>Error al actualizar: " . $conn->error . "</div>";
+        if ($nuevaFoto !== null) {
+            $dir = __DIR__ . '/uploads/';
+            if (!is_dir($dir)) { mkdir($dir, 0755, true); }
+            foreach (glob($dir . "perfil_" . $usuario_id . ".*") ?: [] as $v) { @unlink($v); }
+            move_uploaded_file($nuevaFoto['tmp'], $dir . "perfil_" . $usuario_id . "." . $nuevaFoto['ext']);
+        }
+
+        $stmt = $conn->prepare(
+            "UPDATE usuarios SET nombre=?, apellidos=?, departamento=?, ciudad=?, valor_kwh=?,
+                    tipo_usuario=?, estrato=?, sector=?, limite_diario_kwh=? WHERE id=?"
+        );
+        $stmt->bind_param('ssssdsisdi', $nombre, $apellidos, $departamento, $ciudad, $valor_kwh, $tipo, $estrato, $sector, $limite, $usuario_id);
+        if ($stmt->execute()) {
+            $_SESSION['nombre'] = $nombre;
+            $mensaje = "<div class='alerta exito'>¡Perfil actualizado correctamente!</div>";
+        } else {
+            error_log('Ahorro Eco: no se pudo actualizar el perfil: ' . $stmt->error);
+            $mensaje = "<div class='alerta error'>No se pudo actualizar el perfil. Inténtalo de nuevo.</div>";
+        }
+        $stmt->close();
     }
 }
 
 // 2. Obtener datos actuales del usuario
-$sql = "SELECT nombre, apellidos, correo, departamento, ciudad, direccion, valor_kwh FROM usuarios WHERE id = '$usuario_id'";
-$resultado = $conn->query($sql);
-$usuario = $resultado->fetch_assoc();
-$conn->close();
+$stmt = $conn->prepare("SELECT nombre, apellidos, correo, departamento, ciudad, valor_kwh, tipo_usuario, estrato, sector, limite_diario_kwh FROM usuarios WHERE id = ? LIMIT 1");
+$stmt->bind_param('i', $usuario_id);
+$stmt->execute();
+$usuario = $stmt->get_result()->fetch_assoc();
+$stmt->close();
 
 // 3. Buscar si el usuario tiene foto subida
 $foto_perfil = 'https://cdn-icons-png.flaticon.com/512/149/149071.png';
-$archivos_foto = glob("uploads/perfil_" . $usuario_id . ".*");
+$archivos_foto = glob(__DIR__ . "/uploads/perfil_" . $usuario_id . ".*");
 if (!empty($archivos_foto)) {
-    $foto_perfil = $archivos_foto[0] . "?v=" . time(); 
+    $foto_perfil = 'uploads/' . basename($archivos_foto[0]) . "?v=" . time();
 }
 ?>
 <!DOCTYPE html>
@@ -240,13 +290,14 @@ if (!empty($archivos_foto)) {
                 <?php echo $mensaje; ?>
 
                 <form action="perfil.php" method="POST" enctype="multipart/form-data">
+                    <?php echo csrf_campo(); ?>
                     <div class="form-layout">
                         
                         <!-- Columna Izquierda: Foto de Perfil -->
                         <div class="foto-col">
                             <img src="<?php echo $foto_perfil; ?>" alt="Foto de perfil" class="foto-img">
                             <label style="font-size: 14px; font-weight: bold; color: #333;">Actualizar Foto</label>
-                            <input type="file" name="foto_perfil" accept="image/*" class="foto-input">
+                            <input type="file" name="foto_perfil" accept="image/jpeg,image/png,image/webp" class="foto-input">
                         </div>
 
                         <!-- Columna Derecha: Campos de Formulario en Grid -->
@@ -286,15 +337,41 @@ if (!empty($archivos_foto)) {
                                     <label>Apellidos</label>
                                     <input type="text" name="apellidos" value="<?php echo htmlspecialchars($usuario['apellidos']); ?>" required>
                                 </div>
+                                <div class="input-group">
+                                    <label>Tipo de usuario</label>
+                                    <select name="tipo_usuario" id="tipo_usuario" onchange="alternarPerfil()" required>
+                                        <option value="hogar" <?php echo $usuario['tipo_usuario'] === 'hogar' ? 'selected' : ''; ?>>Hogar</option>
+                                        <option value="microempresa" <?php echo $usuario['tipo_usuario'] === 'microempresa' ? 'selected' : ''; ?>>Microempresa</option>
+                                    </select>
+                                </div>
+
+                                <div class="input-group" id="grp_estrato">
+                                    <label>Estrato</label>
+                                    <select name="estrato">
+                                        <?php for ($i = 1; $i <= 6; $i++): ?>
+                                            <option value="<?php echo $i; ?>" <?php echo (int) $usuario['estrato'] === $i ? 'selected' : ''; ?>>Estrato <?php echo $i; ?></option>
+                                        <?php endfor; ?>
+                                    </select>
+                                </div>
+
+                                <div class="input-group" id="grp_sector">
+                                    <label>Sector del negocio</label>
+                                    <select name="sector">
+                                        <?php foreach ($CFG['sectores'] as $clave => $texto): ?>
+                                            <option value="<?php echo e($clave); ?>" <?php echo $usuario['sector'] === $clave ? 'selected' : ''; ?>><?php echo e($texto); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
 
                                 <div class="input-group full-width">
-                                    <label>Dirección de Residencia</label>
-                                    <input type="text" name="direccion" value="<?php echo htmlspecialchars($usuario['direccion']); ?>" required>
+                                    <label>Límite diario de consumo en kWh (opcional)</label>
+                                    <input type="number" step="0.1" min="0" name="limite_diario_kwh" value="<?php echo e($usuario['limite_diario_kwh']); ?>" placeholder="Ej.: 8">
+                                    <small style="color:#777">Si lo superas, Ahorro Eco te muestra una alerta.</small>
                                 </div>
 
                                 <!-- Campo de Moneda con símbolo $ y COP -->
                                 <div class="input-group full-width">
-                                    <label>Valor kWh (En Pesos Colombianos)</label>
+                                    <label>Valor kWh (módulos IOT y Monitoreo)</label>
                                     <div class="currency-wrapper">
                                         <span class="currency-symbol">$</span>
                                         <input type="number" step="0.01" name="valor_kwh" class="currency-input" value="<?php echo htmlspecialchars($usuario['valor_kwh']); ?>" required>
@@ -308,9 +385,22 @@ if (!empty($archivos_foto)) {
                     
                     <button type="submit" class="btn-black">Guardar Cambios</button>
                 </form>
+
+                <div style="margin-top:28px; padding-top:18px; border-top:1px solid #eee; text-align:center;">
+                    <a href="eliminar_cuenta.php" style="color:#d32f2f; font-weight:bold; text-decoration:none;">Eliminar mi cuenta y mis datos</a>
+                </div>
             </div>
         </main>
 
     </div>
+
+    <script>
+        function alternarPerfil() {
+            var micro = document.getElementById('tipo_usuario').value === 'microempresa';
+            document.getElementById('grp_estrato').style.display = micro ? 'none' : '';
+            document.getElementById('grp_sector').style.display = micro ? '' : 'none';
+        }
+        alternarPerfil();
+    </script>
 </body>
 </html>

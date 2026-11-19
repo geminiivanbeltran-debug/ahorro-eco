@@ -3,3 +3,5 @@ encuesta.php
 iot.php
 registro.php
 tuya_api.php
+uploads/*
+!uploads/.gitkeep
