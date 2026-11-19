@@ -1,8 +1,8 @@
 # 🌱 Ahorro Eco — Plataforma Web e IoT para la Gestión Energética Residencial
 
-Iván Darío Beltrán Cuenca
-Nicolas Montoya Oquendo
-Carlos Alberto Getial Getial
+# Iván Darío Beltrán Cuenca
+# Nicolas Montoya Oquendo
+# Carlos Alberto Getial Getial
 
 **Ahorro Eco** es una plataforma web e IoT diseñada para monitorear, controlar y optimizar el consumo de energía eléctrica en hogares en tiempo real. El sistema integra dispositivos inteligentes mediante la API de **Tuya IoT Platform**, persistencia de datos históricos en **MySQL** y analítica financiera personalizada según el valor del kilovatio-hora ($COP/kWh$) configurado por cada usuario.
 
